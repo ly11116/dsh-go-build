@@ -110,10 +110,47 @@ workflows:
 
       - name: 编译 iOS（未签名）
         script: |
-          set -e
+          set -uo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
           cd "$HOME/dsh-src/app"
-          bash ../tooling/ios/build.sh --release --no-codesign
+          APP="build/ios/iphoneos/Runner.app"
+
+          echo "=== 尝试 1：上游 build.sh --release --no-codesign ==="
+          bash ../tooling/ios/build.sh --release --no-codesign 2>&1 | tee /tmp/ios-build-1.log
+          st1=${PIPESTATUS[0]}
+          echo "exit=$st1"
+          if [ -d "$APP" ]; then
+            echo "::notice::Runner.app 已生成（未签名），继续"
+            exit 0
+          fi
+
+          echo "=== 诊断：Xcode 真实报错 ==="
+          for d in /tmp/xcodebuild_logs build/ios/xcodebuild_logs; do
+            [ -d "$d" ] || continue
+            for f in "$d"/*.log; do
+              [ -f "$f" ] || continue
+              echo "--- $f"
+              grep -E 'error:|warning: .*sign|Code Sign|provisioning|requires a|Signing for' "$f" | head -25 || true
+            done
+          done
+          grep -E 'error:|Code Sign|provisioning|requires' /tmp/ios-build-1.log | head -25 || true
+
+          echo "=== 尝试 2：xcodebuild 直接编，全局关签名 ==="
+          xcodebuild -workspace ios/Runner.xcworkspace \
+            -scheme Runner -configuration Release -sdk iphoneos \
+            -derivedDataPath build/ios \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" EXPANDED_CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            build 2>&1 | tee /tmp/ios-build-2.log | tail -120
+          st2=${PIPESTATUS[0]}
+          echo "exit=$st2"
+          if [ -d "$APP" ]; then
+            echo "::notice::xcodebuild 重试成功，Runner.app 已生成"
+            exit 0
+          fi
+          echo "::error::两种方式都没产出 Runner.app"
+          exit 1
 
       - name: 打包 Payload/*.ipa
         script: |
