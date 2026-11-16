@@ -19,6 +19,9 @@ workflows:
       cache_paths:
         - $HOME/dsh-src/app/ios/Engine/ish-cache
         - $HOME/dsh-src/app/ios/Engine/build
+        - $HOME/dsh-src/tooling/ios/phone-self-runner/target
+        - $HOME/.cargo
+        - $HOME/.rustup
         - $HOME/.pub-cache
         - $HOME/Library/Caches/Homebrew
 
@@ -86,9 +89,29 @@ workflows:
           bash tooling/ios/prepare-engine.sh
           ls -la app/ios/Engine
 
+      - name: Rust 工具链（phone native，pinned 1.99.1）
+        script: |
+          set -e
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+            sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain none --no-modify-path
+          fi
+          echo "export PATH=\"$HOME/.cargo/bin:\$PATH\"" >> "$CM_ENV"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup --version
+          cd "$HOME/dsh-src/tooling/ios/phone-self-runner"
+          # rust-toolchain.toml pins 1.99.1; rustup installs it on first use
+          rustup show
+          cargo --version
+          for t in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+            rustup target add "$t" || echo "::warning::target $t failed to install"
+          done
+          rustup target list --installed
+
       - name: 编译 iOS（未签名）
         script: |
           set -e
+          export PATH="$HOME/.cargo/bin:$PATH"
           cd "$HOME/dsh-src/app"
           bash ../tooling/ios/build.sh --release --no-codesign
 
