@@ -1,8 +1,8 @@
 # DSH Go (ccch1mneyyy/dsh-Go) iOS 未签名 IPA —— Codemagic 工作流
 #
-# 这个文件所在仓库只需要放它自己：真正要编的源码在第一步里 clone 下来。
-# 对应上游的 CI 逻辑：.github/workflows/ios-compile.yml 的 compile 任务，
-# 额外加 tooling/ios/prepare-engine.sh（本机引擎）和打 Payload/ 成 ipa。
+# 这个仓库只放这一个文件：真正要编的源码在第一步 clone 下来。
+# 对应上游 .github/workflows/ios-compile.yml 的 compile 任务，
+# 额外加 tooling/ios/prepare-engine.sh（本机引擎）+ 打 Payload/ 成 ipa。
 
 workflows:
   ios-unsigned:
@@ -10,18 +10,18 @@ workflows:
     instance_type: mac_mini_m2
     max_build_duration: 120
     environment:
+      flutter: 3.47.7
       xcode: 26.6
       vars:
         UPSTREAM: "https://github.com/ccch1mneyyy/dsh-Go.git"
         UPSTREAM_REF: "main"
-        FLUTTER_VERSION: "3.47.7"
-        FLUTTER_SHA256: "dd9da574c3168460550117eb0e8dd0313ae934fabf64a82a6d557fff5fd1422e"
     cache:
       cache_paths:
         - $HOME/dsh-src/app/ios/Engine/ish-cache
         - $HOME/dsh-src/app/ios/Engine/build
         - $HOME/.pub-cache
         - $HOME/Library/Caches/Homebrew
+
     scripts:
       - name: Clone 上游源码
         script: |
@@ -33,44 +33,45 @@ workflows:
           sw_vers
           xcodebuild -version | head -2
 
-      - name: 安装锁定版 Flutter（校验 sha256）
+      - name: 工具链自检
         script: |
           set -e
-          archive="flutter_macos_arm64_${FLUTTER_VERSION}-stable.zip"
-          curl -fsSL -o "$RUNNER_TEMP/$archive" \
-            "https://storage.googleapis.com/flutter_infra_release/releases/stable/macos/$archive"
-          echo "$FLUTTER_SHA256  $RUNNER_TEMP/$archive" | shasum -a 256 -c -
-          unzip -q "$RUNNER_TEMP/$archive" -d "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/flutter/bin" >> "$CM_ENV"
-          export PATH="$RUNNER_TEMP/flutter/bin:$PATH"
+          which flutter
           flutter --version
+          xcodebuild -version | head -1
+          echo "FLUTTER_ROOT=$(dirname "$(dirname "$(which flutter)")")" >> "$CM_ENV"
 
       - name: iSH / guest 工具链（embed 阶段要用）
         script: |
           set -e
           brew install llvm lld
           python3 -m venv "$HOME/ish-tools"
+          "$HOME/ish-tools/bin/pip" install --quiet --upgrade pip
           "$HOME/ish-tools/bin/pip" install --quiet meson==1.7.2 ninja==1.11.1.4
-          echo "$HOME/ish-tools/bin" >> "$CM_ENV"
-          echo "$(brew --prefix llvm)/bin" >> "$CM_ENV"
-          echo "$(brew --prefix lld)/bin" >> "$CM_ENV"
-          "$(brew --prefix lld)/bin/ld.lld" --version
+          LLVM_BIN="$(brew --prefix llvm)/bin"
+          LLD_BIN="$(brew --prefix lld)/bin"
+          echo "export PATH=\"$HOME/ish-tools/bin:$LLVM_BIN:$LLD_BIN:\$PATH\"" >> "$CM_ENV"
+          echo "export DSH_IOS_ENGINE_WORK=\"$HOME/ios-engine-work\"" >> "$CM_ENV"
+          export PATH="$HOME/ish-tools/bin:$LLVM_BIN:$LLD_BIN:$PATH"
+          which meson ninja ld.lld clang
+          ld.lld --version
+          meson --version
 
       - name: Python 版本（prepare-engine 要 >= 3.11）
         script: |
           set -e
-          v=$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')
-          echo "python3 = $v"
+          python3 -c 'import sys;print("python3 =", sys.version)'
           if [ "$(python3 -c 'import sys;print(1 if sys.version_info>=(3,11) else 0)')" != "1" ]; then
             brew install python@3.12
-            ln -sf "$(brew --prefix python@3.12)/bin/python3.12" "$HOME/ish-tools/bin/python3"
-            echo "PYTHON=$HOME/ish-tools/bin/python3" >> "$CM_ENV"
+            PY="$(brew --prefix python@3.12)/bin/python3.12"
+            echo "export PYTHON=\"$PY\"" >> "$CM_ENV"
+            echo "export PATH=\"$(brew --prefix python@3.12)/bin:\$PATH\"" >> "$CM_ENV"
+            "$PY" --version
           fi
 
       - name: 解析依赖
         script: |
           set -e
-          export PATH="$RUNNER_TEMP/flutter/bin:$PATH"
           cd "$HOME/dsh-src"
           python3 app/tool/l10n_merge.py --no-gen
           cd app
@@ -88,7 +89,6 @@ workflows:
       - name: 编译 iOS（未签名）
         script: |
           set -e
-          export PATH="$RUNNER_TEMP/flutter/bin:$PATH"
           cd "$HOME/dsh-src/app"
           bash ../tooling/ios/build.sh --release --no-codesign
 
@@ -96,8 +96,10 @@ workflows:
         script: |
           set -e
           APP="$HOME/dsh-src/app/build/ios/iphoneos/Runner.app"
-          export PATH="$RUNNER_TEMP/flutter/bin:$PATH"
-          name="$(flutter --version | head -1 | awk '{print $2}')"
+          if [ ! -d "$APP" ]; then
+            echo "Runner.app not found"; ls -la "$HOME/dsh-src/app/build/ios" || true
+            exit 1
+          fi
           ver="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")"
           bld="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")"
           IPA="$CM_BUILD_DIR/DSH-Go-${ver}-${bld}-ios-unsigned.ipa"
@@ -107,14 +109,13 @@ workflows:
           rm -f  /tmp/payload/Payload/Runner.app/embedded.mobileprovision
           ( cd /tmp/payload && zip -qry "$IPA" Payload )
           echo "== ipa =="; ls -lh "$IPA"
-          echo "== plist =="
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist"
+          echo "== bundle =="; /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
+          echo "== minos =="; /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist"
           echo "== arch =="; lipo -info "$APP/Runner"
           echo "== frameworks =="; ls "$APP/Frameworks"
           echo "== plugins =="; ls "$APP/PlugIns" 2>/dev/null || true
-          echo "== entries =="; unzip -l "$IPA" | tail -1
           echo "== runtime =="; ls -l "$APP/dsh-runtime" 2>/dev/null || echo "(no dsh-runtime)"
+          echo "== entries =="; unzip -l "$IPA" | tail -1
           shasum -a 256 "$IPA" | tee "$IPA.sha256"
 
     artifacts:
