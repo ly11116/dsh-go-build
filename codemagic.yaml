@@ -29,9 +29,22 @@ workflows:
       - name: Clone 上游源码
         script: |
           set -e
-          rm -rf "$HOME/dsh-src"
-          git clone --depth 1 --branch "$UPSTREAM_REF" "$UPSTREAM" "$HOME/dsh-src"
-          cd "$HOME/dsh-src"
+          cd "$HOME"
+          if [ -d "$HOME/dsh-src/.git" ]; then
+            # 复用已有对象库，避免重复下载 600MB+
+            cd "$HOME/dsh-src"
+            git remote set-url origin "$UPSTREAM"
+            git fetch --depth 1 origin "$UPSTREAM_REF"
+            git reset --hard FETCH_HEAD
+            git clean -fd -e app/ios/Engine -e tooling/ios/phone-self-runner/target || true
+          else
+            mkdir -p "$HOME/dsh-src"
+            cd "$HOME/dsh-src"
+            git init -q
+            git remote add origin "$UPSTREAM" 2>/dev/null || git remote set-url origin "$UPSTREAM"
+            git fetch --depth 1 origin "$UPSTREAM_REF"
+            git reset --hard FETCH_HEAD
+          fi
           echo "commit: $(git rev-parse HEAD)"
           sw_vers
           xcodebuild -version | head -2
@@ -47,18 +60,19 @@ workflows:
       - name: iSH / guest 工具链（embed 阶段要用）
         script: |
           set -e
-          brew install llvm lld
+          brew install llvm lld meson ninja || brew upgrade llvm lld meson ninja
           python3 -m venv "$HOME/ish-tools"
           "$HOME/ish-tools/bin/pip" install --quiet --upgrade pip
           "$HOME/ish-tools/bin/pip" install --quiet meson==1.7.2 ninja==1.11.1.4
           LLVM_BIN="$(brew --prefix llvm)/bin"
           LLD_BIN="$(brew --prefix lld)/bin"
-          echo "export PATH=\"$HOME/ish-tools/bin:$LLVM_BIN:$LLD_BIN:\$PATH\"" >> "$CM_ENV"
+          ISH_PATH="$HOME/ish-tools/bin:$LLVM_BIN:$LLD_BIN:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          echo "export PATH=\"$ISH_PATH\"" >> "$CM_ENV"
           echo "export DSH_IOS_ENGINE_WORK=\"$HOME/ios-engine-work\"" >> "$CM_ENV"
-          export PATH="$HOME/ish-tools/bin:$LLVM_BIN:$LLD_BIN:$PATH"
+          export PATH="$ISH_PATH"
           which meson ninja ld.lld clang
-          ld.lld --version
           meson --version
+          ld.lld --version
 
       - name: Python 版本（prepare-engine 要 >= 3.11）
         script: |
@@ -111,7 +125,11 @@ workflows:
       - name: 编译 iOS（未签名）
         script: |
           set -uo pipefail
-          export PATH="$HOME/.cargo/bin:$PATH"
+          export PATH="$HOME/ish-tools/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          echo "PATH=$PATH"
+          for t in meson ninja ld.lld clang cargo rustup xcrun; do
+            printf '%-8s %s\n' "$t" "$(command -v $t || echo MISSING)"
+          done
           cd "$HOME/dsh-src/app"
           APP="build/ios/iphoneos/Runner.app"
 
